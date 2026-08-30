@@ -1,0 +1,180 @@
+/*
+  Controle de 2 LEDs + 1 Servo Motor com velocidade ajustável - Arduino Uno
+  ---------------------------------------------------------------------------
+  Comportamento:
+  - Inicia com o LED 7 aceso, LED 8 apagado e o servo em 0 graus.
+  - Botão da porta 4: alterna entre LED 7 e LED 8, sempre que apertado
+    (funciona nos dois sentidos: 7->8 e 8->7).
+  - Botão da porta 12: só faz o LED 7 apagar e o LED 8 acender.
+    Se o LED 8 já estiver aceso, apertar o botão 12 não faz nada.
+  - Servo motor: toda vez que o LED 8 acender, o servo vai para 180 graus.
+    Toda vez que o LED 7 acender, o servo vai para 0 graus.
+  - O servo se move suavemente, grau por grau, e o tempo entre cada
+    grau é definido pela variável "tempo" (em milissegundos).
+      tempo = 1   -> movimento o mais rápido possível
+      tempo = 100 -> movimento o mais lento possível
+  - ENQUANTO o servo estiver se movendo (fora de 0 ou 180 graus),
+    os botões são ignorados. Só é possível trocar de LED novamente
+    quando o servo tiver chegado completamente a um dos extremos.
+*/
+// ---------- Biblioteca do Servo ----------
+#include <Servo.h>
+// ---------- Definição dos pinos ----------
+const int led7 = 7;      // LED conectado na porta 7
+const int led8 = 8;      // LED conectado na porta 8
+const int pinoServo = 3; // Servo motor conectado na porta 3
+const int botaoA = 4;    // Botão que alterna entre os dois LEDs
+const int botaoB = 12;   // Botão que só troca de LED7 para LED8 (mão única)
+// ---------- Objeto do Servo ----------
+
+Servo meuServo;
+
+// ---------- Variável de velocidade do servo ----------
+// Tempo (em milissegundos) que o servo espera entre cada grau de movimento.
+// Ajuste esse valor conforme desejar:
+//   1   = velocidade máxima (quase instantâneo)
+//   100 = velocidade mínima (bem devagar)
+int tempo = 15;
+
+// ---------- Variáveis de estado dos LEDs ----------
+// estadoLed guarda qual LED está aceso no momento
+// 0 = LED7 aceso | 1 = LED8 aceso
+int estadoLed = 0;
+
+// ---------- Variáveis de controle do movimento do servo ----------
+int anguloAtual = 0;         // ângulo em que o servo está agora
+int anguloDestino = 0;       // ângulo para onde o servo está indo
+bool servoMovendo = false;   // true enquanto o servo ainda não chegou ao destino
+unsigned long ultimoPasso = 0; // guarda o instante (millis) do último grau movido
+
+// ---------- Variáveis de leitura dos botões ----------
+int estadoBotaoA_Anterior = HIGH;
+int estadoBotaoB_Anterior = HIGH;
+
+// Controle de debounce (evita leituras falsas por ruído elétrico
+// no contato mecânico do botão) - um tempo mínimo para cada botão
+unsigned long ultimoDebounceA = 0;
+unsigned long ultimoDebounceB = 0;
+const unsigned long debounceDelay = 50; // 50 milissegundos
+
+// ---------- Função auxiliar: inicia o movimento do servo até um ângulo ----------
+// Não trava o programa (não usa delay()), apenas define o destino.
+// O movimento real acontece aos poucos dentro de moverServoGradualmente(),
+// chamada a cada volta do loop().
+void iniciarMovimentoServo(int destino) {
+  anguloDestino = destino;
+  servoMovendo = true;
+  ultimoPasso = millis();
+}
+
+// ---------- Função auxiliar: acende o LED7 e manda o servo para 0 graus ----------
+void ligarLed7() {
+  digitalWrite(led7, HIGH);
+  delay(300);
+  digitalWrite(led8, LOW);
+  estadoLed = 0;
+  iniciarMovimentoServo(0);
+  delay(300);
+}
+
+// ---------- Função auxiliar: acende o LED8 e manda o servo para 180 graus ----------
+void ligarLed8() {
+  digitalWrite(led7, LOW);
+  delay(300);
+  digitalWrite(led8, HIGH);
+  estadoLed = 1;
+  iniciarMovimentoServo(180);
+  delay(300);
+}
+
+// ---------- Função que move o servo grau a grau, de forma não-bloqueante ----------
+// Deve ser chamada a cada iteração do loop().
+void moverServoGradualmente() {
+  if (!servoMovendo) return; // se já chegou ao destino, não faz nada
+
+  // Só avança um grau quando já se passou o tempo definido em "tempo"
+  if (millis() - ultimoPasso >= (unsigned long) tempo) {
+    if (anguloAtual < anguloDestino) {
+      anguloAtual++;
+    } else if (anguloAtual > anguloDestino) {
+      anguloAtual--;
+    }
+
+    meuServo.write(anguloAtual);
+    ultimoPasso = millis();
+
+    // Verifica se chegou ao destino (extremo 0 ou 180 graus)
+    if (anguloAtual == anguloDestino) {
+      servoMovendo = false; // libera os botões novamente
+    }
+  }
+}
+
+void setup() {
+  // Define os LEDs como saída
+  pinMode(led7, OUTPUT);
+  pinMode(led8, OUTPUT);
+
+  // Define os botões como entrada com resistor de pull-up interno.
+  pinMode(botaoA, INPUT_PULLUP);
+  pinMode(botaoB, INPUT_PULLUP);
+
+  // Conecta o objeto Servo ao pino físico do servo motor
+  meuServo.attach(pinoServo);
+
+  // Estado inicial: LED 7 aceso, LED 8 apagado, servo em 0 graus
+  anguloAtual = 0;
+  meuServo.write(anguloAtual);
+  digitalWrite(led7, HIGH);
+  digitalWrite(led8, LOW);
+  estadoLed = 0;
+  servoMovendo = false; // já começa parado, no extremo 0 graus
+}
+
+void loop() {
+  // Atualiza o movimento do servo a cada volta do loop (não trava o programa)
+  moverServoGradualmente();
+
+  // Lê o estado atual de cada botão
+  int leituraA = digitalRead(botaoA);
+  int leituraB = digitalRead(botaoB);
+
+  // ---------- BOTÃO A (porta 4) - alterna entre os dois LEDs ----------
+  // Detecta a borda de descida: estava solto (HIGH) e agora foi apertado (LOW)
+  if (leituraA == LOW && estadoBotaoA_Anterior == HIGH) {
+    if (millis() - ultimoDebounceA > debounceDelay) {
+
+      // Só permite trocar de LED se o servo NÃO estiver em movimento,
+      // ou seja, se ele já estiver totalmente em 0 ou 180 graus.
+      if (!servoMovendo) {
+        if (estadoLed == 0) {
+          ligarLed8();
+        } else {
+          ligarLed7();
+        }
+      }
+
+      ultimoDebounceA = millis();
+    }
+  }
+  estadoBotaoA_Anterior = leituraA;
+
+
+  // ---------- BOTÃO B (porta 12) - só troca de LED7 para LED8 ----------
+  if (leituraB == LOW && estadoBotaoB_Anterior == HIGH) {
+    if (millis() - ultimoDebounceB > debounceDelay) {
+
+      // Só permite a ação se o servo NÃO estiver em movimento
+      // E se o LED7 estiver aceso no momento (estadoLed == 0).
+      if (!servoMovendo && estadoLed == 0) {
+        ligarLed8();
+      }
+      // Se o servo estiver em movimento, ou o LED8 já estiver aceso,
+      // o botão B não faz nada.
+
+      ultimoDebounceB = millis();
+    }
+  }
+  estadoBotaoB_Anterior = leituraB;
+}
+
