@@ -1,7 +1,8 @@
 /*
-  Controle de 2 LEDs + 1 Servo Motor com velocidade ajustável - Arduino Uno
+  Controle de 2 LEDs + 1 Servo Motor com velocidade por potenciômetro
+  e buzina de aviso - Arduino Uno
   ---------------------------------------------------------------------------
-  Comportamento:
+  Comportamento geral:
   - Inicia com o LED 7 aceso, LED 8 apagado e o servo em 0 graus.
   - Botão da porta 4: alterna entre LED 7 e LED 8, sempre que apertado
     (funciona nos dois sentidos: 7->8 e 8->7).
@@ -9,32 +10,65 @@
     Se o LED 8 já estiver aceso, apertar o botão 12 não faz nada.
   - Servo motor: toda vez que o LED 8 acender, o servo vai para 180 graus.
     Toda vez que o LED 7 acender, o servo vai para 0 graus.
-  - O servo se move suavemente, grau por grau, e o tempo entre cada
-    grau é definido pela variável "tempo" (em milissegundos).
-      tempo = 1   -> movimento o mais rápido possível
-      tempo = 100 -> movimento o mais lento possível
-  - ENQUANTO o servo estiver se movendo (fora de 0 ou 180 graus),
-    os botões são ignorados. Só é possível trocar de LED novamente
-    quando o servo tiver chegado completamente a um dos extremos.
+  - Potenciômetro (pino A0): controla a velocidade do servo EM TEMPO REAL,
+    inclusive durante o movimento. Ele substitui totalmente a antiga
+    variável fixa "tempo".
+      Pote todo para um lado  -> tempo = 1   -> movimento o mais rápido possível
+      Pote todo para o outro  -> tempo = 100 -> movimento o mais lento possível
+  - Buzina (pino 10): sempre que um botão válido é apertado, o sistema
+    entra em uma "fase de aviso" de 3 segundos, durante a qual a buzina
+    apita em intervalos (intermitente). Só DEPOIS desses 3 segundos o
+    LED realmente troca e o servo começa a se mover. A buzina continua
+    apitando em intervalos durante todo o movimento do servo, e só para
+    completamente quando o servo chega ao destino (0 ou 180 graus).
+  - ENQUANTO o sistema estiver em "aviso" OU o servo estiver se movendo,
+    os botões são ignorados. Só é possível iniciar uma nova troca quando
+    tudo estiver parado (servo em um dos extremos e sem aviso em curso).
+
+  ---------------------------------------------------------------------------
+  Ligações elétricas:
+  - LED 7: anodo -> pino 7, catodo -> resistor (~220 ohm) -> GND
+  - LED 8: mesmo esquema, catodo -> resistor -> GND
+  - Botão A (alterna): um terminal -> pino 4, outro -> GND (usa INPUT_PULLUP)
+  - Botão B (mão única): um terminal -> pino 12, outro -> GND (INPUT_PULLUP)
+  - Servo: sinal -> pino 3 | alimentação -> FONTE EXTERNA de 5V
+           | GND -> GND da fonte externa E também ligado ao GND do Arduino
+    (servos consomem corrente demais para o pino 5V do Arduino sozinho)
+  - Potenciômetro: um terminal -> 5V do ARDUINO (não da fonte externa),
+           outro terminal -> GND do Arduino, cursor central -> pino A0
+    (usar o 5V do próprio Arduino, e não a fonte externa do servo, evita
+    que oscilações de corrente do servo "contaminem" a leitura analógica)
+  - Buzina: terminal positivo -> pino 10, terminal negativo -> GND
+    (buzina ativa genérica, liga/desliga direto com digitalWrite)
 */
+
 // ---------- Biblioteca do Servo ----------
 #include <Servo.h>
-// ---------- Definição dos pinos ----------
-const int led7 = 7;      // LED conectado na porta 7
-const int led8 = 8;      // LED conectado na porta 8
-const int pinoServo = 3; // Servo motor conectado na porta 3
-const int botaoA = 4;    // Botão que alterna entre os dois LEDs
-const int botaoB = 12;   // Botão que só troca de LED7 para LED8 (mão única)
-// ---------- Objeto do Servo ----------
 
+// ---------- Definição dos pinos ----------
+const int led7 = 7;               // LED conectado na porta 7
+const int led8 = 8;               // LED conectado na porta 8
+const int pinoServo = 3;          // Servo motor conectado na porta 3
+const int botaoA = 4;             // Botão que alterna entre os dois LEDs
+const int botaoB = 12;            // Botão que só troca de LED7 para LED8 (mão única)
+const int pinoBuzina = 10;        // Buzina de aviso
+const int pinoPotenciometro = A0; // Potenciômetro que define a velocidade do servo
+
+// ---------- Objeto do Servo ----------
 Servo meuServo;
 
 // ---------- Variável de velocidade do servo ----------
 // Tempo (em milissegundos) que o servo espera entre cada grau de movimento.
-// Ajuste esse valor conforme desejar:
-//   1   = velocidade máxima (quase instantâneo)
-//   100 = velocidade mínima (bem devagar)
+// Agora é lida continuamente do potenciômetro dentro do loop() - não é
+// mais um valor fixo. O valor inicial abaixo só é usado até a primeira
+// leitura do potenciômetro acontecer.
 int tempo = 15;
+
+// Faixa de velocidade equivalente ao "tempo" antigo:
+//   tempoMinimo = velocidade máxima (quase instantâneo)
+//   tempoMaximo = velocidade mínima (bem devagar)
+const int tempoMinimo = 1;
+const int tempoMaximo = 100;
 
 // ---------- Variáveis de estado dos LEDs ----------
 // estadoLed guarda qual LED está aceso no momento
@@ -42,9 +76,9 @@ int tempo = 15;
 int estadoLed = 0;
 
 // ---------- Variáveis de controle do movimento do servo ----------
-int anguloAtual = 0;         // ângulo em que o servo está agora
-int anguloDestino = 0;       // ângulo para onde o servo está indo
-bool servoMovendo = false;   // true enquanto o servo ainda não chegou ao destino
+int anguloAtual = 0;           // ângulo em que o servo está agora
+int anguloDestino = 0;         // ângulo para onde o servo está indo
+bool servoMovendo = false;     // true enquanto o servo ainda não chegou ao destino
 unsigned long ultimoPasso = 0; // guarda o instante (millis) do último grau movido
 
 // ---------- Variáveis de leitura dos botões ----------
@@ -56,6 +90,28 @@ int estadoBotaoB_Anterior = HIGH;
 unsigned long ultimoDebounceA = 0;
 unsigned long ultimoDebounceB = 0;
 const unsigned long debounceDelay = 50; // 50 milissegundos
+
+// ---------- Controle da FASE DE OPERAÇÃO (novo) ----------
+// O sistema passa por três fases sempre que um botão válido é apertado:
+//   PARADO   -> nada acontecendo, botões liberados
+//   AVISANDO -> buzina apitando, aguardando os 3 segundos de aviso
+//   MOVENDO  -> LED já trocou, servo se movendo, buzina ainda apitando
+enum FaseOperacao { PARADO, AVISANDO, MOVENDO };
+FaseOperacao fase = PARADO;
+
+int proximoLedAlvo = 0;            // para qual LED (0 = led7, 1 = led8) vamos trocar
+unsigned long inicioFaseAviso = 0; // instante (millis) em que a fase de aviso começou
+const unsigned long tempoAviso = 3000; // 3 segundos de aviso antes do servo se mover
+
+// ---------- Controle do apito intermitente da buzina ----------
+unsigned long ultimoBeepToggle = 0;
+bool buzinaLigadaAgora = false;
+
+// Intervalo (em milissegundos) entre cada "toggle" da buzina, ou seja,
+// o tempo que ela fica ligada e o tempo que fica desligada em seguida.
+// Ajuste esse valor livremente para deixar o apito mais rápido (número
+// menor) ou mais espaçado (número maior).
+unsigned long intervaloBeep = 300;
 
 // ---------- Função auxiliar: inicia o movimento do servo até um ângulo ----------
 // Não trava o programa (não usa delay()), apenas define o destino.
@@ -88,7 +144,9 @@ void ligarLed8() {
 }
 
 // ---------- Função que move o servo grau a grau, de forma não-bloqueante ----------
-// Deve ser chamada a cada iteração do loop().
+// Deve ser chamada a cada iteração do loop(). Usa a variável global "tempo",
+// que por sua vez é atualizada a cada loop pela leitura do potenciômetro -
+// por isso é possível acelerar/desacelerar o servo NO MEIO do movimento.
 void moverServoGradualmente() {
   if (!servoMovendo) return; // se já chegou ao destino, não faz nada
 
@@ -105,7 +163,74 @@ void moverServoGradualmente() {
 
     // Verifica se chegou ao destino (extremo 0 ou 180 graus)
     if (anguloAtual == anguloDestino) {
-      servoMovendo = false; // libera os botões novamente
+      servoMovendo = false; // libera a fase MOVENDO (ver atualizarFaseOperacao)
+    }
+  }
+}
+
+// ---------- Função auxiliar: lê o potenciômetro e atualiza a velocidade ----------
+// Chamada a cada volta do loop(), independente de o servo estar se
+// movendo ou não - assim o valor de "tempo" está sempre atualizado no
+// instante em que for necessário.
+void atualizarVelocidadePeloPotenciometro() {
+  int leituraPote = analogRead(pinoPotenciometro); // 0 a 1023
+  tempo = map(leituraPote, 0, 1023, tempoMinimo, tempoMaximo);
+}
+
+// ---------- Função auxiliar: inicia uma troca de LED (entra na fase de aviso) ----------
+// Não troca o LED nem move o servo imediatamente - apenas agenda a troca
+// para depois dos "tempoAviso" milissegundos de buzina.
+void iniciarTroca(int ledAlvo) {
+  proximoLedAlvo = ledAlvo;
+  fase = AVISANDO;
+  inicioFaseAviso = millis();
+
+  // Reinicia o controle do apito para começar já ligado nesta nova fase
+  ultimoBeepToggle = millis();
+  buzinaLigadaAgora = true;
+  digitalWrite(pinoBuzina, HIGH);
+}
+
+// ---------- Função auxiliar: controla o apito intermitente da buzina ----------
+// A buzina apita (liga/desliga) tanto durante a fase de AVISO quanto
+// durante a fase de MOVIMENTO. Fora dessas fases, fica sempre desligada.
+void atualizarBuzina() {
+  if (fase == AVISANDO || fase == MOVENDO) {
+    if (millis() - ultimoBeepToggle >= intervaloBeep) {
+      buzinaLigadaAgora = !buzinaLigadaAgora;
+      digitalWrite(pinoBuzina, buzinaLigadaAgora ? HIGH : LOW);
+      ultimoBeepToggle = millis();
+    }
+  } else {
+    // Fase PARADO: garante que a buzina fique desligada
+    if (buzinaLigadaAgora) {
+      buzinaLigadaAgora = false;
+      digitalWrite(pinoBuzina, LOW);
+    }
+  }
+}
+
+// ---------- Função auxiliar: avança a máquina de fases (aviso -> movendo -> parado) ----------
+void atualizarFaseOperacao() {
+  if (fase == AVISANDO) {
+    // Ainda dentro dos 3 segundos de aviso? Não faz nada além de apitar
+    // (o apito já é tratado em atualizarBuzina()).
+    if (millis() - inicioFaseAviso >= tempoAviso) {
+      // Os 3 segundos de aviso terminaram: agora sim troca o LED e
+      // manda o servo se mover.
+      if (proximoLedAlvo == 0) {
+        ligarLed7();
+      } else {
+        ligarLed8();
+      }
+      fase = MOVENDO;
+    }
+  } else if (fase == MOVENDO) {
+    // Quando o servo terminar de chegar ao destino, servoMovendo vira
+    // false dentro de moverServoGradualmente(). Assim que detectamos
+    // isso, encerramos a fase e liberamos os botões novamente.
+    if (!servoMovendo) {
+      fase = PARADO;
     }
   }
 }
@@ -119,6 +244,10 @@ void setup() {
   pinMode(botaoA, INPUT_PULLUP);
   pinMode(botaoB, INPUT_PULLUP);
 
+  // Define a buzina como saída, já começando desligada
+  pinMode(pinoBuzina, OUTPUT);
+  digitalWrite(pinoBuzina, LOW);
+
   // Conecta o objeto Servo ao pino físico do servo motor
   meuServo.attach(pinoServo);
 
@@ -129,11 +258,23 @@ void setup() {
   digitalWrite(led8, LOW);
   estadoLed = 0;
   servoMovendo = false; // já começa parado, no extremo 0 graus
+  fase = PARADO;        // sistema começa livre, sem aviso nem movimento
 }
 
 void loop() {
+  // Atualiza a velocidade do servo a partir do potenciômetro (vale mesmo
+  // durante o movimento, permitindo acelerar/desacelerar ao vivo)
+  atualizarVelocidadePeloPotenciometro();
+
   // Atualiza o movimento do servo a cada volta do loop (não trava o programa)
   moverServoGradualmente();
+
+  // Atualiza o apito intermitente da buzina (aviso e movimento)
+  atualizarBuzina();
+
+  // Avança a máquina de fases: aviso (3s) -> troca de LED + início do
+  // movimento -> fim do movimento -> volta a PARADO
+  atualizarFaseOperacao();
 
   // Lê o estado atual de cada botão
   int leituraA = digitalRead(botaoA);
@@ -144,13 +285,13 @@ void loop() {
   if (leituraA == LOW && estadoBotaoA_Anterior == HIGH) {
     if (millis() - ultimoDebounceA > debounceDelay) {
 
-      // Só permite trocar de LED se o servo NÃO estiver em movimento,
-      // ou seja, se ele já estiver totalmente em 0 ou 180 graus.
-      if (!servoMovendo) {
+      // Só permite iniciar uma nova troca se o sistema estiver
+      // totalmente PARADO (nem avisando, nem movendo).
+      if (fase == PARADO) {
         if (estadoLed == 0) {
-          ligarLed8();
+          iniciarTroca(1); // vai para o LED8
         } else {
-          ligarLed7();
+          iniciarTroca(0); // vai para o LED7
         }
       }
 
@@ -159,22 +300,20 @@ void loop() {
   }
   estadoBotaoA_Anterior = leituraA;
 
-
   // ---------- BOTÃO B (porta 12) - só troca de LED7 para LED8 ----------
   if (leituraB == LOW && estadoBotaoB_Anterior == HIGH) {
     if (millis() - ultimoDebounceB > debounceDelay) {
 
-      // Só permite a ação se o servo NÃO estiver em movimento
+      // Só permite a ação se o sistema estiver PARADO
       // E se o LED7 estiver aceso no momento (estadoLed == 0).
-      if (!servoMovendo && estadoLed == 0) {
-        ligarLed8();
+      if (fase == PARADO && estadoLed == 0) {
+        iniciarTroca(1); // vai para o LED8
       }
-      // Se o servo estiver em movimento, ou o LED8 já estiver aceso,
-      // o botão B não faz nada.
+      // Se o sistema estiver ocupado (avisando ou movendo), ou o LED8
+      // já estiver aceso, o botão B não faz nada.
 
       ultimoDebounceB = millis();
     }
   }
   estadoBotaoB_Anterior = leituraB;
 }
-
