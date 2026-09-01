@@ -93,5 +93,104 @@ Because this is read every loop cycle, turning the knob **while the gate is alre
 
 ## Notes
 
-- `ligarLed7()` and `ligarLed8()` each contain two `delay(300)` calls. These briefly pause the whole program on every transition (600ms total), which pauses the horn and gate updates during that window — worth keeping in mind if very precise timing between the light and the horn/gate matters.
+- `ligarLed7()` and `ligarLed8()` each contain two `delay(300)` calls, used intentionally to work around a button debounce issue. These briefly pause the whole program on every transition (600ms total), including the horn and gate updates during that window — this is expected behavior, not a bug.
 - Not currently planned: additional lights/states beyond the two dock statuses, a cycle counter with display, or a fully automatic toggling mode.
+
+# Sistema de Status de Doca de Caminhões — Arduino Uno
+
+Sistema de controle baseado em Arduino Uno para uma doca de caminhões. Duas luzes de status indicam se a doca está ocupada ou livre, um servo motor representa o portão da doca, um potenciômetro ajusta a velocidade do portão em tempo real, e uma buzina de aviso alerta a equipe antes e durante o movimento do portão.
+
+## Visão geral
+
+- **Luz 7 (doca livre)**: inicia ligada por padrão.
+- **Luz 8 (doca ocupada)**: acende quando um caminhão está atracando.
+- **Servo motor (portão)**: vai para 0° quando a doca está livre (Luz 7) e para 180° quando está ocupada (Luz 8).
+- **Botão A**: controle geral — alterna o status da doca nos dois sentidos (livre ↔ ocupada).
+- **Botão B**: acionamento de mão única — sinaliza apenas "doca ocupada". Se a doca já estiver ocupada, apertar de novo não faz nada; só o Botão A consegue voltar para "livre".
+- **Potenciômetro**: define a velocidade de movimento do portão **em tempo real**, inclusive enquanto o portão já está se movendo.
+- **Buzina de aviso**: apita de forma intermitente por 3 segundos *antes* do portão começar a se mover, e continua apitando intermitentemente durante todo o movimento. Só para completamente quando o portão chega ao destino.
+- **Trava de segurança**: enquanto o sistema estiver na fase de aviso ou o portão estiver se movendo, os dois botões são ignorados. Um novo comando só é aceito quando tudo estiver completamente parado.
+
+## Fases de operação
+
+O sistema passa por três fases sempre que um botão válido é apertado:
+
+| Fase       | O que acontece                                                         |
+|------------|---------------------------------------------------------------------------|
+| `PARADO`   | Ocioso — botões ativos, buzina desligada, portão em 0° ou 180°            |
+| `AVISANDO` | Fase de aviso — buzina apita intermitentemente por 3 segundos, portão ainda parado |
+| `MOVENDO`  | Portão se movendo até o ângulo alvo, buzina continua apitando intermitentemente |
+
+Assim que o portão chega ao destino, o sistema volta para `PARADO` e os botões voltam a funcionar.
+
+## Hardware
+
+| Componente             | Observação                                            |
+|--------------------------|----------------------------------------------------------|
+| Arduino Uno              | —                                                          |
+| 2x Luz de status (LED)   | + resistores de ~220Ω                                      |
+| 2x Botão (push button)   | Sem necessidade de resistor externo (`INPUT_PULLUP`)       |
+| 1x Servo motor           | Representa o portão; precisa de alimentação externa de 5V  |
+| 1x Potenciômetro         | Define a velocidade do portão em tempo real                |
+| 1x Buzina de aviso       | Buzina ativa, acionada diretamente com `digitalWrite`       |
+
+## Ligações
+
+| Componente               | Pino Arduino | Observação                                                     |
+|----------------------------|:------------:|-------------------------------------------------------------------|
+| Luz 7 (doca livre)         | 7            | Catodo → resistor → GND                                          |
+| Luz 8 (doca ocupada)       | 8            | Catodo → resistor → GND                                          |
+| Botão A (alterna)          | 4            | Um terminal no pino, outro no GND                                 |
+| Botão B (só ocupa)         | 12           | Um terminal no pino, outro no GND                                 |
+| Servo (sinal)              | 3            | Fio de sinal (geralmente laranja/amarelo)                          |
+| Servo (alimentação)        | Fonte externa 5V | Fonte **externa** de 5V — GND ligado ao GND do Arduino         |
+| Potenciômetro              | A0           | Terminais externos → 5V e GND do próprio Arduino; cursor → A0     |
+| Buzina de aviso            | 10           | Terminal positivo → pino 10, negativo → GND                       |
+
+> ⚠️ **Alimentação do servo:** servos podem consumir mais corrente do que o pino 5V do Arduino fornece com segurança. Alimente o servo com uma fonte **externa** de 5V, com o GND dessa fonte ligado ao GND do Arduino.
+>
+> ⚠️ **Alimentação do potenciômetro:** ligue o potenciômetro ao 5V do **próprio Arduino**, não à fonte externa do servo — isso evita que oscilações de corrente do servo interfiram na leitura analógica.
+
+## Velocidade do portão (potenciômetro)
+
+A velocidade do portão é lida continuamente do potenciômetro no pino `A0` e convertida no intervalo entre cada grau de movimento do servo:
+
+```cpp
+tempo = map(leituraPote, 0, 1023, tempoMinimo, tempoMaximo);
+```
+
+- Potenciômetro todo para um lado → `tempo = 1` → movimento o mais rápido possível
+- Potenciômetro todo para o outro lado → `tempo = 100` → movimento o mais lento possível
+
+Como essa leitura acontece a cada volta do loop, girar o potenciômetro **durante o movimento do portão** já muda a velocidade imediatamente.
+
+## Comportamento da buzina
+
+- `intervaloBeep` (padrão 300ms) controla a velocidade do apito (liga/desliga) — menor é mais rápido, maior é mais espaçado.
+- `tempoAviso` (padrão 3000ms) controla quanto tempo dura a fase de aviso antes do portão começar a se mover.
+- A buzina apita tanto na fase de aviso quanto na fase de movimento, e desliga completamente assim que o portão fica parado.
+
+## Estrutura do código
+
+- `iniciarTroca()`: inicia uma troca de status — entra na fase `AVISANDO` e liga a buzina, sem mexer ainda nas luzes ou no portão.
+- `atualizarFaseOperacao()`: avança a máquina de fases (`AVISANDO` → `MOVENDO` → `PARADO`).
+- `ligarLed7()` / `ligarLed8()`: ajustam as luzes de status da doca e disparam o movimento do portão para o ângulo correspondente.
+- `moverServoGradualmente()`: move o servo um grau por vez, de forma não-bloqueante, respeitando o valor atual de `tempo`.
+- `atualizarVelocidadePeloPotenciometro()`: lê o potenciômetro a cada loop e atualiza `tempo`.
+- `atualizarBuzina()`: controla o apito intermitente durante as fases de aviso e movimento.
+- Debounce de 50ms aplicado individualmente a cada botão.
+
+## Como usar
+
+1. Monte o circuito conforme a tabela de ligações.
+2. Abra o arquivo `.ino` na IDE do Arduino.
+3. Selecione a placa **Arduino Uno** e a porta serial correta.
+4. Faça o upload do código.
+5. Aperte um botão — a buzina apitará por 3 segundos, depois a luz e o portão trocam, com a buzina continuando a apitar até o portão terminar de se mover.
+6. Gire o potenciômetro para ajustar a velocidade do portão, mesmo durante o movimento.
+
+## Observações
+
+- As funções `ligarLed7()` e `ligarLed8()` contêm dois `delay(300)` cada, usados propositalmente para contornar um problema de debounce nos botões. Isso pausa brevemente todo o programa a cada troca (600ms no total), incluindo a buzina e a atualização do portão nesse intervalo — é um comportamento esperado, não um bug.
+- Não está planejado por enquanto: mais de duas luzes/estados, contador de ciclos com display, ou um modo totalmente automático de alternância.
+
