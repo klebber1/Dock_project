@@ -317,3 +317,4 @@ void loop() {
   }
   estadoBotaoB_Anterior = leituraB;
 }
+
